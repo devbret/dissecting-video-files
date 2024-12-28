@@ -1,19 +1,16 @@
 import os
 import cv2
 import numpy as np
-import ffmpeg
 import json
+import math
 
 input_dir = 'videos'
-output_dir = 'scenes'
-os.makedirs(output_dir, exist_ok=True)
+os.makedirs(input_dir, exist_ok=True)
 
-motion_threshold = 10000
-min_scene_duration = 2 
-frame_skip = 3
+frame_skip = 1
 frame_resize = (320, 240)
 
-metrics = {}
+video_metrics = {}
 
 def convert_numpy(obj):
     if isinstance(obj, (np.integer, int)):
@@ -25,86 +22,145 @@ def convert_numpy(obj):
     else:
         raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
+def calc_entropy(gray_frame):
+    hist, _ = np.histogram(gray_frame, bins=256, range=(0, 256))
+    total_pixels = np.sum(hist)
+    if total_pixels == 0:
+        return 0.0
+    p = hist / total_pixels
+    entropy = 0.0
+    for val in p:
+        if val > 0:
+            entropy -= val * math.log2(val)
+    return entropy
+
 for video_file in os.listdir(input_dir):
     if video_file.endswith('.mp4'):
         video_path = os.path.join(input_dir, video_file)
 
         cap = cv2.VideoCapture(video_path)
-        ret, prev_frame = cap.read()
+        ret, frame = cap.read()
         if not ret:
-            print(f"Failed to read {video_file}")
+            print(f"Could not read '{video_file}'. Skipping.")
+            cap.release()
             continue
 
-        prev_frame = cv2.resize(prev_frame, frame_resize)
-        prev_frame = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-        scene_start = 0
-        scene_counter = 1
+        prev_frame_resized = cv2.resize(frame, frame_resize)
+        prev_gray = cv2.cvtColor(prev_frame_resized, cv2.COLOR_BGR2GRAY)
 
+        fgbg = cv2.createBackgroundSubtractorMOG2()
+
+        frames_data = []
         frame_rate = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = 0
-        last_scene_time = 0
-
-        video_metrics = []
+        frame_index = 0
 
         while ret:
-            for _ in range(frame_skip):
-                ret, curr_frame = cap.read()
+            for _ in range(frame_skip - 1):
+                ret, frame = cap.read()
+                frame_index += 1
                 if not ret:
                     break
+
             if not ret:
                 break
 
-            curr_frame_resized = cv2.resize(curr_frame, frame_resize)
-            curr_frame_gray = cv2.cvtColor(curr_frame_resized, cv2.COLOR_BGR2GRAY)
+            curr_frame_resized = cv2.resize(frame, frame_resize)
+            curr_gray = cv2.cvtColor(curr_frame_resized, cv2.COLOR_BGR2GRAY)
 
-            frame_diff = cv2.absdiff(prev_frame, curr_frame_gray)
-            motion_score = np.sum(frame_diff)
+            current_time = frame_index / frame_rate
 
-            current_time = frame_count / frame_rate
+            fgmask = fgbg.apply(curr_gray)
+            motion_score = np.sum(fgmask) / 255.0
 
-            video_metrics.append({
-                'time': current_time,
-                'motion_score': float(motion_score)
-            })
+            flow = cv2.calcOpticalFlowFarneback(
+                prev_gray, curr_gray,
+                None, 0.5, 3, 15, 3, 5, 1.2, 0
+            )
+            flow_magnitude = np.linalg.norm(flow, axis=2)
+            flow_score = np.mean(flow_magnitude)
 
-            if motion_score > motion_threshold and (current_time - last_scene_time) > min_scene_duration:
-                scene_end = current_time
+            avg_luminance = np.mean(curr_gray)
 
-                output_file = os.path.join(output_dir, f'{os.path.splitext(video_file)[0]}_scene_{scene_counter}.mp4')
-                try:
-                    (
-                        ffmpeg.input(video_path, ss=scene_start, to=scene_end)
-                        .output(output_file, vcodec='copy', acodec='copy')
-                        .run(overwrite_output=True)
-                    )
-                    print(f"Scene {scene_counter} saved: {output_file}")
-                except Exception as e:
-                    print(f"Error processing scene {scene_counter}: {e}")
+            laplacian_var = cv2.Laplacian(curr_gray, cv2.CV_64F).var()
 
-                scene_start = scene_end
-                last_scene_time = current_time
-                scene_counter += 1
+            edges = cv2.Canny(curr_gray, 100, 200)
+            edge_count = np.count_nonzero(edges)
 
-            prev_frame = curr_frame_gray
-            frame_count += frame_skip
+            b, g, r = cv2.split(curr_frame_resized)
 
-        scene_end = cap.get(cv2.CAP_PROP_FRAME_COUNT) / frame_rate
-        if scene_end - scene_start > min_scene_duration:
-            output_file = os.path.join(output_dir, f'{os.path.splitext(video_file)[0]}_scene_{scene_counter}.mp4')
-            try:
-                (
-                    ffmpeg.input(video_path, ss=scene_start, to=scene_end)
-                    .output(output_file, vcodec='copy', acodec='copy')
-                    .run(overwrite_output=True)
-                )
-                print(f"Scene {scene_counter} saved: {output_file}")
-            except Exception as e:
-                print(f"Error processing scene {scene_counter}: {e}")
+            avg_red = np.mean(r)
 
-        metrics[video_file] = video_metrics
+            avg_green = np.mean(g)
+
+            avg_blue = np.mean(b)
+
+            hsv = cv2.cvtColor(curr_frame_resized, cv2.COLOR_BGR2HSV)
+            h_channel, s_channel, v_channel = cv2.split(hsv)
+
+            avg_hue = np.mean(h_channel)
+
+            avg_saturation = np.mean(s_channel)
+
+            grayscale_contrast = float(curr_gray.max() - curr_gray.min())
+
+            grayscale_stddev = float(np.std(curr_gray))
+
+            grayscale_entropy = calc_entropy(curr_gray)
+
+            saturation_stddev = float(np.std(s_channel))
+
+            hue_stddev = float(np.std(h_channel))
+
+            red_stddev = float(np.std(r))
+
+            green_stddev = float(np.std(g))
+
+            blue_stddev = float(np.std(b))
+
+            sobelx = cv2.Sobel(curr_gray, cv2.CV_64F, 1, 0, ksize=3)
+            sobely = cv2.Sobel(curr_gray, cv2.CV_64F, 0, 1, ksize=3)
+            sobel_magnitude = np.sqrt(sobelx**2 + sobely**2)
+
+            sobel_magnitude_mean = float(np.mean(sobel_magnitude))
+
+            sobel_magnitude_std = float(np.std(sobel_magnitude))
+
+            frame_data = {
+                "time": current_time,
+                "motion_score": float(motion_score),
+                "flow_score": float(flow_score),
+                "avg_luminance": float(avg_luminance),
+                "laplacian_var": float(laplacian_var),
+                "edge_count": int(edge_count),
+                "avg_red": float(avg_red),
+                "avg_green": float(avg_green),
+                "avg_blue": float(avg_blue),
+                "avg_hue": float(avg_hue),
+                "avg_saturation": float(avg_saturation),
+                "grayscale_contrast": grayscale_contrast,
+                "grayscale_stddev": grayscale_stddev,
+                "grayscale_entropy": grayscale_entropy,
+                "saturation_stddev": saturation_stddev,
+                "hue_stddev": hue_stddev,
+                "red_stddev": red_stddev,
+                "green_stddev": green_stddev,
+                "blue_stddev": blue_stddev,
+                "sobel_magnitude_mean": sobel_magnitude_mean,
+                "sobel_magnitude_std": sobel_magnitude_std
+            }
+
+            frames_data.append(frame_data)
+
+            prev_gray = curr_gray
+            ret, frame = cap.read()
+            frame_index += 1
+
         cap.release()
+        video_metrics[video_file] = frames_data
 
-with open('video_metrics.json', 'w') as f:
-    json.dump(metrics, f, indent=4, default=convert_numpy)
+output_json = 'video_metrics.json'
+with open(output_json, 'w') as f:
+    json.dump(video_metrics, f, indent=4, default=convert_numpy)
 
-print("Motion-based scene splitting complete! Metrics saved to video_metrics.json")
+print(f"Frame-by-frame metrics have been saved to '{output_json}'.")
+
