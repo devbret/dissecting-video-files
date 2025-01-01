@@ -1,4 +1,7 @@
 /scenes
 /venv
 /videos
+/frames
+/temp_frames
 video_metrics.json
+frame_aligned_audio.json
