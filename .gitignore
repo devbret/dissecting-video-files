@@ -1,6 +1,6 @@
 /scenes
 /venv
-/videos
+/videos/*.mp4
 /frames
 /temp_frames
 video_metrics.json
